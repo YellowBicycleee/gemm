@@ -112,21 +112,21 @@ __global__ void gemm_wmma_shared(const half *__restrict__ A, const half *__restr
         wmma::mma_sync(C_frag, A_frag, B_frag, C_frag);
     }
 
-    wmma::store_matrix_sync(C + warp_row * N + warp_col, C_frag, N, wmma::mem_row_major);
+    // wmma::store_matrix_sync(C + warp_row * N + warp_col, C_frag, N, wmma::mem_row_major);
     // store to smem c
-    // wmma::store_matrix_sync(C_shared, C_frag, N, wmma::mem_row_major);
-    // for (int j = threadIdx.x; j < WMMA_M * WMMA_N; j += WARP_SIZE) {
-    //     m = j / WMMA_N;
-    //     n = j % WMMA_N;
-    //     global_m = warp_row + m;
-    //     global_n = warp_col + n;
-    //     // global, i_C = warp_row + m; j_C = warp_col + n
-    //     // C[(warp_row + m) * N + (warp_col + n)] = C_shared[j];
-    //     if (global_m < M && global_n < N) {
-    //         C[(warp_row + m) * N + (warp_col + n)] = C_shared[j];
-    //     }
-    // }
-    // __syncwarp();
+    wmma::store_matrix_sync(C_shared, C_frag, WMMA_N, wmma::mem_row_major);
+    for (int j = threadIdx.x; j < WMMA_M * WMMA_N; j += WARP_SIZE) {
+        m = j / WMMA_N;
+        n = j % WMMA_N;
+        global_m = warp_row + m;
+        global_n = warp_col + n;
+        // global, i_C = warp_row + m; j_C = warp_col + n
+        // C[(warp_row + m) * N + (warp_col + n)] = C_shared[j];
+        if (global_m < M && global_n < N) {
+            C[(warp_row + m) * N + (warp_col + n)] = C_shared[j];
+        }
+    }
+    __syncwarp();
 }
 
 void wmmaNaive(half *A, half *B, half *C, size_t M, size_t N, size_t K) {
