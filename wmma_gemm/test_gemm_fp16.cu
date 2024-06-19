@@ -59,7 +59,7 @@ __global__ void gemm_wmma_shared(const half *__restrict__ A, const half *__restr
     int global_m;
     int global_n;
 
-    if (warp_row >= M && warp_col >= N) {
+    if (warp_row >= M || warp_col >= N) {
         return;
     }
 
@@ -70,24 +70,31 @@ __global__ void gemm_wmma_shared(const half *__restrict__ A, const half *__restr
 #pragma unroll
     for (size_t i = 0; i < K_tiles; ++i) {
         // load a
-        // int row_step = WMMA_M / (WARP_SIZE / WMMA_K);
-        // a index
-        // m = threadIdx.x / WMMA_K;
-        // n = threadIdx.x % WMMA_K;
-
-        // load a
+        // wmma::load_matrix_sync(A_frag, A + warp_row * K + i * WMMA_K, K);
         for (int j = threadIdx.x; j < WMMA_M * WMMA_K; j += WARP_SIZE) {
             m = j / WMMA_K;  // smem index
             n = j % WMMA_K;  // smem index
+            global_m = warp_row + m;
+            global_n = i * WMMA_K + n;
             // global_index  i_A = warp_row + m, j_A = i * WMMA_K + n
-            A_shared[j] = A[(warp_row + m) * K + (i * WMMA_K + n)];
+            if (global_m < M && global_n < K) {
+                A_shared[j] = A[global_m * K + global_n];
+            } else {
+                A_shared[j] = 0;  // Zero padding
+            }
         }
         // load b
         for (int j = threadIdx.x; j < WMMA_K * WMMA_N; j += WARP_SIZE) {
             m = j / WMMA_N;  // smem   index
             n = j % WMMA_N;  // smem   index
+            global_m = i * WMMA_K + m;
+            global_n = warp_col + n;
             // global_index, i_B = i * WMMA_K + m, j_B = warp_col + n
-            B_shared[j] = B[(i * WMMA_K + m) * N + (warp_col + n)];
+            if (global_m < K && global_n < N) {
+                B_shared[j] = B[global_m * N + global_n];
+            } else {
+                B_shared[j] = 0;  // Zero padding
+            }
         }
         __syncwarp();
 
@@ -99,28 +106,34 @@ __global__ void gemm_wmma_shared(const half *__restrict__ A, const half *__restr
         // wmma::load_matrix_sync(A_frag, A + warp_row * K + i * WMMA_K, K);
         // wmma::load_matrix_sync(B_frag, B + i * WMMA_K * N + warp_col, N);
 
-        wmma::load_matrix_sync(A_frag, A_shared, K);
-        wmma::load_matrix_sync(B_frag, B_shared, N);
+        wmma::load_matrix_sync(A_frag, A_shared, WMMA_K);
+        wmma::load_matrix_sync(B_frag, B_shared, WMMA_N);
 
         wmma::mma_sync(C_frag, A_frag, B_frag, C_frag);
     }
 
-    wmma::store_matrix_sync(C_shared, C_frag, N, wmma::mem_row_major);
-    // wmma::store_matrix_sync(C + warp_row * N + warp_col, C_frag, N, wmma::mem_row_major);
+    wmma::store_matrix_sync(C + warp_row * N + warp_col, C_frag, N, wmma::mem_row_major);
     // store to smem c
-    for (int j = 0; j < WMMA_M * WMMA_N; j += WARP_SIZE) {
-        m = j / WMMA_N;
-        n = j % WMMA_N;
-        // global, i_C = warp_row + m; j_C = warp_col + n
-        C[(warp_row + m) * N + (warp_col + n)] = C_shared[j];
-    }
-    __syncwarp();
+    // wmma::store_matrix_sync(C_shared, C_frag, N, wmma::mem_row_major);
+    // for (int j = threadIdx.x; j < WMMA_M * WMMA_N; j += WARP_SIZE) {
+    //     m = j / WMMA_N;
+    //     n = j % WMMA_N;
+    //     global_m = warp_row + m;
+    //     global_n = warp_col + n;
+    //     // global, i_C = warp_row + m; j_C = warp_col + n
+    //     // C[(warp_row + m) * N + (warp_col + n)] = C_shared[j];
+    //     if (global_m < M && global_n < N) {
+    //         C[(warp_row + m) * N + (warp_col + n)] = C_shared[j];
+    //     }
+    // }
+    // __syncwarp();
 }
 
 void wmmaNaive(half *A, half *B, half *C, size_t M, size_t N, size_t K) {
     dim3 block(WARP_SIZE);
     dim3 grid(div_ceil(N, WMMA_N), div_ceil(M, WMMA_M));
-    gemm_wmma<<<grid, block>>>(A, B, C, M, N, K);
+    // gemm_wmma<<<grid, block>>>(A, B, C, M, N, K);
+    gemm_wmma_shared<<<grid, block>>>(A, B, C, M, N, K);
     cudaDeviceSynchronize();
     // gemm_wmma_shared<<<grid, block>>>(A, B, C, M, N, K);
 }
@@ -134,7 +147,7 @@ void gemm_cpu(half *a, half *b, half *c, int M, int N, int K) {
                 sum += __half2float(a[i * K + k]) * __half2float(b[k * N + j]);
             }
             c[i * N + j] = __float2half(sum);
-            printf("sum = %e\n", __half2float(c[i * N + j]));
+            // printf("sum = %e\n", __half2float(c[i * N + j]));
         }
     }
 }
@@ -148,7 +161,7 @@ float compare_res(half *h_res, half *d_res, int M, int N) {
         for (int j = 0; j < NEW_N; ++j) {
             diff += fabs(__half2float(h_res[i * N + j]) - __half2float(d_res[i * N + j]));
         }
-        printf("diff = %e\n", diff);
+        // printf("diff = %e\n", diff);
 
         printf("h: ");
         for (int j = 0; j < N; ++j) {
@@ -198,9 +211,9 @@ int main(int argc, char **argv) {
     half *d_b;
     half *d_c;
 
-    const int M = 16;
-    const int N = 16;
-    const int K = 16;
+    const int M = 32;
+    const int N = 32;
+    const int K = 32;
 
     h_a = (half *)malloc(M * K * sizeof(half));
     h_b = (half *)malloc(K * N * sizeof(half));
